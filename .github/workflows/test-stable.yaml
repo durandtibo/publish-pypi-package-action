@@ -48,6 +48,8 @@ on:
     tags:
       - "test-v*"
       - "test-build-v*"
+  schedule:
+    - cron: "0 9 * * *" # Run nightly at 9:00 AM UTC to catch issues from external changes
 
 permissions:
   contents: read
