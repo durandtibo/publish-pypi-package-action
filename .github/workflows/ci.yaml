@@ -1,0 +1,115 @@
+# Tests this composite action by publishing the fixture package to
+# TestPyPI (never real PyPI) via Trusted Publishing. Also tests its
+# checksum-verification failure path (reject-tampered-checksums).
+#
+# One-time setup required before this can pass: register a TestPyPI Trusted
+# Publisher for a "pypi-release-action-fixture" project pointing at this
+# repo, workflow file "ci.yaml", environment "testpypi".
+# See https://docs.pypi.org/trusted-publishers/adding-a-publisher/
+# (use test.pypi.org's equivalent page).
+#
+# Manual trigger only, since it publishes a real (test) package version.
+
+name: CI
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Publishing isn't OS-dependent, so a single build here just produces
+    # the one "dist" artifact this action's tests consume. Uses a plain
+    # "uv build" rather than the build-pypi-package-action, to keep this
+    # repo's tests independent of that other action.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7
+
+      - name: Stage fixture package at repo root
+        run: cp -r test/fixtures/pkg/. .
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # ratchet:astral-sh/setup-uv@v10.1.0
+
+      - name: Build package
+        run: uv build
+
+      - name: Generate checksums
+        run: cd dist && sha256sum -- *.tar.gz *.whl > SHA256SUMS
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # ratchet:actions/upload-artifact@v7.0.1
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/pypi-release-action-fixture/
+    permissions:
+      id-token: write # PyPI Trusted Publishing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7
+
+      - name: Run publish action
+        uses: ./
+        with:
+          workflow-filename: ci.yaml
+          repository-url: https://test.pypi.org/legacy/
+
+  reject-tampered-checksums:
+    # publish must fail closed if the downloaded "dist" artifact doesn't
+    # match the checksums recorded at build time (e.g. artifact corruption
+    # or tampering), before it ever attempts to publish anything. Doesn't
+    # need PyPI/OIDC permissions since it never reaches the publish step.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7
+
+      - name: Stage fixture package at repo root
+        run: cp -r test/fixtures/pkg/. .
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # ratchet:astral-sh/setup-uv@v10.1.0
+
+      - name: Build package
+        run: uv build
+
+      - name: Generate checksums
+        run: cd dist && sha256sum -- *.tar.gz *.whl > SHA256SUMS
+
+      - name: Tamper with a built distribution
+        run: echo "corrupted" >> dist/*.tar.gz
+
+      - name: Upload dist artifact under the name publish expects
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # ratchet:actions/upload-artifact@v7.0.1
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+
+      - name: Run publish action
+        id: publish
+        continue-on-error: true
+        uses: ./
+        with:
+          workflow-filename: ci.yaml
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Assert publish action failed
+        run: |
+          test "${{ steps.publish.outcome }}" = "failure" || {
+            echo "::error::expected publish to fail on tampered checksums, got outcome=${{ steps.publish.outcome }}"; exit 1;
+          }
