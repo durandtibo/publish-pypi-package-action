@@ -1,6 +1,10 @@
 name: Publish PyPI package
 description: Verifies checksums and Sigstore signatures, then publishes the package to PyPI via Trusted Publishing (OIDC).
 
+branding:
+  icon: package
+  color: blue
+
 inputs:
   workflow-filename:
     description: >
