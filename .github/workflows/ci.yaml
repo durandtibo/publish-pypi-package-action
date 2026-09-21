@@ -1,18 +1,31 @@
 # Tests this composite action by publishing the fixture package to
-# TestPyPI (never real PyPI) via Trusted Publishing. Also tests its
-# checksum-verification failure path (reject-tampered-checksums).
+# TestPyPI (never real PyPI) via Trusted Publishing. Covers three paths:
+#   - publish: the happy path on a non-tag ref (Sigstore verification
+#     skipped, matching a normal branch/PR build).
+#   - reject-tampered-checksums: publish must fail closed on a corrupted
+#     "dist" artifact, before it ever attempts to publish anything.
+#   - build-and-sign-tag / publish-tag: a tag push, which is the only ref
+#     type that exercises this action's Sigstore signature verification.
+#     Triggered by manually pushing a "test-vX" tag; never a real release
+#     tag.
 #
 # One-time setup required before this can pass: register a TestPyPI Trusted
 # Publisher for a "pypi-release-action-fixture" project pointing at this
-# repo, workflow file "ci.yaml", environment "testpypi".
+# repo, workflow file "ci.yaml", environment "testpypi". This covers both
+# trigger types below, since PyPI Trusted Publishers key off repo + workflow
+# filename + environment, not the triggering ref.
 # See https://docs.pypi.org/trusted-publishers/adding-a-publisher/
 # (use test.pypi.org's equivalent page).
 #
-# Manual trigger only, since it publishes a real (test) package version.
+# Each publish targets a unique fixture version (derived from the run ID),
+# since TestPyPI rejects re-uploading an existing version.
 
 name: CI
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "test-v*"
 
 permissions:
   contents: read
@@ -23,6 +36,7 @@ jobs:
     # the one "dist" artifact this action's tests consume. Uses a plain
     # "uv build" rather than the build-pypi-package-action, to keep this
     # repo's tests independent of that other action.
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -31,6 +45,9 @@ jobs:
 
       - name: Stage fixture package at repo root
         run: cp -r test/fixtures/pkg/. .
+
+      - name: Set unique fixture version
+        run: sed -i "s/^version = .*/version = \"0.0.1.dev${{ github.run_id }}\"/" pyproject.toml
 
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # ratchet:astral-sh/setup-uv@v10.1.0
@@ -50,6 +67,7 @@ jobs:
 
   publish:
     needs: build
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment:
@@ -72,6 +90,7 @@ jobs:
     # match the checksums recorded at build time (e.g. artifact corruption
     # or tampering), before it ever attempts to publish anything. Doesn't
     # need PyPI/OIDC permissions since it never reaches the publish step.
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -113,3 +132,70 @@ jobs:
           test "${{ steps.publish.outcome }}" = "failure" || {
             echo "::error::expected publish to fail on tampered checksums, got outcome=${{ steps.publish.outcome }}"; exit 1;
           }
+
+  build-and-sign-tag:
+    # Only a tag push reaches this action's Sigstore verification steps, so
+    # this job (and publish-tag below) is the only coverage for that path.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write # Sigstore keyless signing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7
+
+      - name: Stage fixture package at repo root
+        run: cp -r test/fixtures/pkg/. .
+
+      - name: Set unique fixture version
+        run: sed -i "s/^version = .*/version = \"0.0.1.dev${{ github.run_id }}\"/" pyproject.toml
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # ratchet:astral-sh/setup-uv@v10.1.0
+
+      - name: Build package
+        run: uv build
+
+      - name: Generate checksums
+        run: cd dist && sha256sum -- *.tar.gz *.whl > SHA256SUMS
+
+      - name: Sign distributions with Sigstore
+        run: uvx sigstore sign dist/*.tar.gz dist/*.whl
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # ratchet:actions/upload-artifact@v7.0.1
+        with:
+          name: dist
+          path: |
+            dist/*.tar.gz
+            dist/*.whl
+            dist/SHA256SUMS
+          retention-days: 1
+
+      - name: Upload signature bundles
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # ratchet:actions/upload-artifact@v7.0.1
+        with:
+          name: signatures
+          path: dist/*.sigstore*
+          retention-days: 1
+
+  publish-tag:
+    needs: build-and-sign-tag
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/pypi-release-action-fixture/
+    permissions:
+      id-token: write # PyPI Trusted Publishing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7
+
+      - name: Run publish action
+        uses: ./
+        with:
+          workflow-filename: ci.yaml
+          repository-url: https://test.pypi.org/legacy/
