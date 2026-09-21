@@ -1,0 +1,41 @@
+# Nightly workflow that pushes throwaway "test-v*"/"test-build-v*" tags to
+# this repo. A tag push is the only ref type that reaches the
+# build-and-sign-tag / publish-tag jobs in test-local.yaml and test-stable.yaml
+# (the only jobs that exercise this action's Sigstore signing/verification
+# path), and those have so far only run when someone remembers to push a
+# test tag by hand. This workflow automates that, so the Sigstore path gets
+# nightly coverage too.
+#
+# Deletes any "test-v*"/"test-build-v*" tags left over from the previous run
+# before pushing a fresh pair. Safe because by the time this runs again (24h
+# later) the workflows those tags triggered will long since have finished,
+# so the delete can't race a run that still needs the tag to exist.
+
+name: Nightly Tag Trigger
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * *" # nightly, ahead of test-local.yaml's own 9:00 AM UTC schedule
+
+permissions:
+  contents: write
+
+jobs:
+  push-test-tags:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Delete previous test tags
+        run: git tag -l 'test-v*' 'test-build-v*' | xargs -r -n1 git push origin --delete
+
+      - name: Push fresh test tags
+        run: |
+          git tag "test-v${{ github.run_id }}"
+          git tag "test-build-v${{ github.run_id }}"
+          git push origin "test-v${{ github.run_id }}" "test-build-v${{ github.run_id }}"
