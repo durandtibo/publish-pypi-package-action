@@ -1,10 +1,5 @@
 name: Publish PyPI package
-description: >
-  Downloads the "dist" (and, on tag pushes, "signatures") artifacts,
-  verifies checksums and Sigstore signatures, and publishes the package to
-  PyPI via Trusted Publishing (OIDC). Requires `id-token: write` permission
-  on the calling job, and a workflow-file path matching what is registered
-  as the PyPI Trusted Publisher.
+description: Verifies checksums and Sigstore signatures, then publishes the package to PyPI via Trusted Publishing (OIDC).
 
 inputs:
   workflow-filename:
