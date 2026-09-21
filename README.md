@@ -1,6 +1,7 @@
 # publish-pypi-package-action
 
-[![CI](https://github.com/durandtibo/publish-pypi-package-action/actions/workflows/ci.yaml/badge.svg)](https://github.com/durandtibo/publish-pypi-package-action/actions/workflows/ci.yaml)
+[![Test Local Action](https://github.com/durandtibo/publish-pypi-package-action/actions/workflows/test-local.yaml/badge.svg)](https://github.com/durandtibo/publish-pypi-package-action/actions/workflows/test-local.yaml)
+[![Test Stable Action](https://github.com/durandtibo/publish-pypi-package-action/actions/workflows/test-stable.yaml/badge.svg)](https://github.com/durandtibo/publish-pypi-package-action/actions/workflows/test-stable.yaml)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-blue)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/tag/durandtibo/publish-pypi-package-action?label=release)](https://github.com/durandtibo/publish-pypi-package-action/tags)
 
