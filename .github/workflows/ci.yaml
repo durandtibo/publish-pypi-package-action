@@ -1,5 +1,5 @@
 # Tests this composite action by publishing the fixture package to
-# TestPyPI (never real PyPI) via Trusted Publishing. Covers three paths:
+# TestPyPI (never real PyPI) via Trusted Publishing. Covers four paths:
 #   - publish: the happy path on a non-tag ref (Sigstore verification
 #     skipped, matching a normal branch/PR build).
 #   - reject-tampered-checksums: publish must fail closed on a corrupted
@@ -8,10 +8,21 @@
 #     type that exercises this action's Sigstore signature verification.
 #     Triggered by manually pushing a "test-vX" tag; never a real release
 #     tag.
+#   - build-with-build-action / publish-build-action: builds the fixture
+#     with durandtibo/build-pypi-package-action instead of a plain
+#     "uv build", to verify this action stays compatible with the "dist"
+#     artifact (contents and SHA256SUMS format) that action produces on a
+#     non-tag ref.
+#   - build-and-sign-tag-with-build-action / publish-tag-build-action: same
+#     compatibility check as above, but on a tag push, so it also covers
+#     Sigstore signing/verification against that action's "dist" artifact.
+#     Triggered by pushing a "test-build-vX" tag (a distinct prefix from
+#     "test-vX", so the two tag jobs never run in the same workflow run
+#     and their "dist"/"signatures" artifact names never collide).
 #
 # One-time setup required before this can pass: register a TestPyPI Trusted
 # Publisher for a "pypi-release-action-fixture" project pointing at this
-# repo, workflow file "ci.yaml", environment "testpypi". This covers both
+# repo, workflow file "ci.yaml", environment "testpypi". This covers all
 # trigger types below, since PyPI Trusted Publishers key off repo + workflow
 # filename + environment, not the triggering ref.
 # See https://docs.pypi.org/trusted-publishers/adding-a-publisher/
@@ -26,6 +37,7 @@ on:
   push:
     tags:
       - "test-v*"
+      - "test-build-v*"
 
 permissions:
   contents: read
@@ -133,10 +145,81 @@ jobs:
             echo "::error::expected publish to fail on tampered checksums, got outcome=${{ steps.publish.outcome }}"; exit 1;
           }
 
+  build-with-build-action:
+    # Builds the fixture with durandtibo/build-pypi-package-action rather
+    # than a plain "uv build", so publish-build-action below exercises this
+    # action against that action's real "dist" artifact output.
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7
+
+      - name: Stage fixture package at repo root
+        run: cp -r test/fixtures/pkg/. .
+
+      - name: Set unique fixture version
+        run: sed -i "s/^version = .*/version = \"0.0.1.dev${{ github.run_id }}\"/" pyproject.toml
+
+      - name: Run build action
+        uses: durandtibo/build-pypi-package-action@3781c7eb97f68448f70e67e386f03aac7f7be384 # ratchet:durandtibo/build-pypi-package-action@v0.0.2
+        with:
+          artifact-name: dist-build-action
+
+  publish-build-action:
+    needs: build-with-build-action
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/pypi-release-action-fixture/
+    permissions:
+      id-token: write # PyPI Trusted Publishing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7
+
+      - name: Download distribution artifacts built by build-pypi-package-action
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # ratchet:actions/download-artifact@v8.0.1
+        with:
+          name: dist-build-action
+          path: dist/
+
+      - name: Assert dist layout and SHA256SUMS format are as this action expects
+        run: |
+          cd dist
+          test -f SHA256SUMS || {
+            echo "::error::build-pypi-package-action did not produce a SHA256SUMS file"; exit 1;
+          }
+          compgen -G "*.tar.gz" > /dev/null || {
+            echo "::error::no sdist (*.tar.gz) found in dist artifact"; exit 1;
+          }
+          compgen -G "*.whl" > /dev/null || {
+            echo "::error::no wheel (*.whl) found in dist artifact"; exit 1;
+          }
+          sha256sum --check SHA256SUMS
+
+      - name: Re-upload under the artifact name publish expects
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # ratchet:actions/upload-artifact@v7.0.1
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+
+      - name: Run publish action
+        uses: ./
+        with:
+          workflow-filename: ci.yaml
+          repository-url: https://test.pypi.org/legacy/
+
   build-and-sign-tag:
     # Only a tag push reaches this action's Sigstore verification steps, so
     # this job (and publish-tag below) is the only coverage for that path.
-    if: github.ref_type == 'tag'
+    # Excludes "test-build-v*" tags so its "dist"/"signatures" artifacts
+    # never collide with build-and-sign-tag-with-build-action's.
+    if: github.ref_type == 'tag' && !startsWith(github.ref_name, 'test-build-v')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -182,7 +265,79 @@ jobs:
 
   publish-tag:
     needs: build-and-sign-tag
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && !startsWith(github.ref_name, 'test-build-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/pypi-release-action-fixture/
+    permissions:
+      id-token: write # PyPI Trusted Publishing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7
+
+      - name: Run publish action
+        uses: ./
+        with:
+          workflow-filename: ci.yaml
+          repository-url: https://test.pypi.org/legacy/
+
+  build-and-sign-tag-with-build-action:
+    # Same compatibility check as build-with-build-action, but on a tag
+    # push: verifies this action's Sigstore verification step also accepts
+    # signatures produced against build-pypi-package-action's "dist"
+    # artifact, not just a plain "uv build" one. Runs only for
+    # "test-build-v*" tags (see build-and-sign-tag above).
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'test-build-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write # Sigstore keyless signing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7
+
+      - name: Stage fixture package at repo root
+        run: cp -r test/fixtures/pkg/. .
+
+      - name: Set unique fixture version
+        run: sed -i "s/^version = .*/version = \"0.0.1.dev${{ github.run_id }}\"/" pyproject.toml
+
+      - name: Run build action
+        uses: durandtibo/build-pypi-package-action@3781c7eb97f68448f70e67e386f03aac7f7be384 # ratchet:durandtibo/build-pypi-package-action@v0.0.2
+        with:
+          artifact-name: dist-build-action
+
+      - name: Download distribution artifacts built by build-pypi-package-action
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # ratchet:actions/download-artifact@v8.0.1
+        with:
+          name: dist-build-action
+          path: dist/
+
+      - name: Sign distributions with Sigstore
+        run: uvx sigstore sign dist/*.tar.gz dist/*.whl
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # ratchet:actions/upload-artifact@v7.0.1
+        with:
+          name: dist
+          path: |
+            dist/*.tar.gz
+            dist/*.whl
+            dist/SHA256SUMS
+          retention-days: 1
+
+      - name: Upload signature bundles
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # ratchet:actions/upload-artifact@v7.0.1
+        with:
+          name: signatures
+          path: dist/*.sigstore*
+          retention-days: 1
+
+  publish-tag-build-action:
+    needs: build-and-sign-tag-with-build-action
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'test-build-v')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment:
