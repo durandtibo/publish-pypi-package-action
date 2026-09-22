@@ -24,6 +24,35 @@ everyone. This action exists to catch the usual ways that goes wrong _before_ th
 
 If any of these are true, the action fails the job and nothing gets published.
 
+## ⚠️ Known issue: this action does not currently work
+
+The "Publish package to PyPI" step wraps
+[`pypa/gh-action-pypi-publish`](https://github.com/pypa/gh-action-pypi-publish), which internally generates a
+Docker container action at runtime and locates its image via the `github.action_repository`/
+`github.action_ref` contexts. Those contexts are not resolved correctly when a Docker-backed composite
+action is invoked from _inside another_ composite action
+([`actions/runner#2473`](https://github.com/actions/runner/issues/2473)) — and that's exactly what this
+action does, since it's itself a composite action wrapping `pypa/gh-action-pypi-publish`.
+
+In practice, the generated trampoline action resolves to
+`ghcr.io/durandtibo/publish-pypi-package-action:<sha>` (this repo's own image, which does not exist) instead
+of `ghcr.io/pypa/gh-action-pypi-publish:<sha>`, and the job fails with a Docker pull error such as:
+
+```
+docker: Error response from daemon: Head "https://ghcr.io/v2/durandtibo/publish-pypi-package-action/manifests/<sha>": denied
+```
+
+This is a known, unsupported usage pattern upstream — see
+[`pypa/gh-action-pypi-publish#291`](https://github.com/pypa/gh-action-pypi-publish/issues/291): the
+maintainers explicitly note that calling `pypa/gh-action-pypi-publish` from within another composite action
+is untested and unsupported, and there's no fix available at the runner level.
+
+**Until this is resolved, don't use this action's publish step.** Call
+`pypa/gh-action-pypi-publish` directly from your workflow instead (see
+[`coola`'s `release-pypi.yaml`](https://github.com/durandtibo/coola/blob/main/.github/workflows/release-pypi.yaml)
+for a working example that inlines the checksum/Sigstore verification steps and calls the publish action
+straight from the workflow, with no wrapping composite action).
+
 ## How it works
 
 1. Downloads the `dist` workflow artifact (wheel, sdist, `SHA256SUMS`) uploaded by an earlier job.
